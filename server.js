@@ -24,9 +24,10 @@ async function getCoinGeckoPrice(pair) {
           vs_currencies: "usdt"
         }
       });
-      return parseFloat(response.data.bitcoin.usdt);
+      const price = parseFloat(response.data.bitcoin.usdt);
+      console.log("CoinGecko price:", price);
+      return price;
     }
-    // For additional pairs, you can extend this mapping
     return null;
   } catch (error) {
     console.error("Error fetching price from CoinGecko:", error.message);
@@ -43,7 +44,9 @@ async function getGeminiPrice(pair) {
     }
     const url = `https://api.gemini.com/v1/pubticker/${geminiPair.toLowerCase()}`;
     const response = await axios.get(url);
-    return parseFloat(response.data.last);
+    const price = parseFloat(response.data.last);
+    console.log("Gemini price:", price);
+    return price;
   } catch (error) {
     console.error("Error fetching Gemini price:", error.message);
     return null;
@@ -51,7 +54,6 @@ async function getGeminiPrice(pair) {
 }
 
 // Helper: Fetch historical closing prices from CoinGecko for technical analysis (SMA)
-// This function fetches hourly price data for the past 1 day for BTCUSDT.
 async function getHistoricalPrices(pair, days = 1) {
   try {
     if (pair.toUpperCase() === "BTCUSDT") {
@@ -62,8 +64,9 @@ async function getHistoricalPrices(pair, days = 1) {
           interval: "hourly"
         }
       });
-      // response.data.prices is an array: [timestamp, price]
+      // response.data.prices: Array of [timestamp, price]
       const prices = response.data.prices.map(item => parseFloat(item[1]));
+      console.log("Historical prices:", prices.slice(-5));
       return prices;
     }
     return null;
@@ -84,56 +87,70 @@ app.post("/api/trading-signal", async (req, res) => {
     const upperPair = pair.toUpperCase();
 
     // Fetch current prices concurrently:
-    // - Use CoinGecko for current price (since Binance gives 451 error)
-    // - Use Gemini for a secondary data point
     const [coingeckoPrice, geminiPrice] = await Promise.all([
       getCoinGeckoPrice(upperPair),
       getGeminiPrice(upperPair)
     ]);
 
-    if (!coingeckoPrice || !geminiPrice) {
+    // If both sources fail, return error.
+    if (!coingeckoPrice && !geminiPrice) {
       return res.status(500).json({ error: "Failed to fetch current market prices." });
     }
 
-    // Compute the average price
-    const averagePrice = (coingeckoPrice + geminiPrice) / 2;
+    // Use available prices:
+    let priceForCalculation;
+    if (coingeckoPrice && geminiPrice) {
+      priceForCalculation = (coingeckoPrice + geminiPrice) / 2;
+    } else if (coingeckoPrice) {
+      priceForCalculation = coingeckoPrice;
+    } else {
+      priceForCalculation = geminiPrice;
+    }
+
+    // For logging:
+    console.log("Price used for calculation:", priceForCalculation);
 
     // Fetch historical prices for SMA calculation
     const historicalPrices = await getHistoricalPrices(upperPair, 1); // 1 day of hourly data
     let currentSMA = null;
     if (historicalPrices && historicalPrices.length >= 14) {
       const smaValues = sma({ period: 14, values: historicalPrices });
-      currentSMA = smaValues[smaValues.length - 1] || averagePrice;
+      currentSMA = smaValues[smaValues.length - 1] || priceForCalculation;
     }
 
-    // Calculate percentage difference between CoinGecko and Gemini prices
-    const diffPercent = Math.abs((coingeckoPrice - geminiPrice) / geminiPrice) * 100;
+    // Calculate percentage difference if both prices are available
+    let diffPercent = "N/A";
+    if (coingeckoPrice && geminiPrice) {
+      diffPercent = Math.abs((coingeckoPrice - geminiPrice) / geminiPrice) * 100;
+    }
 
-    // Generate trading signal using SMA if available; otherwise, use average price defaults
+    // Generate trading signal using SMA if available; otherwise, use priceForCalculation
     let signal;
     if (currentSMA !== null) {
-      if (averagePrice > currentSMA) {
+      if (priceForCalculation > currentSMA) {
+        // Bullish scenario
         signal = {
-          entry: (averagePrice * 1.005).toFixed(2),
-          stopLoss: (averagePrice * 0.98).toFixed(2),
-          takeProfit: (averagePrice * 1.03).toFixed(2),
+          entry: (priceForCalculation * 1.005).toFixed(2),
+          stopLoss: (priceForCalculation * 0.98).toFixed(2),
+          takeProfit: (priceForCalculation * 1.03).toFixed(2),
           rationale: "Bullish momentum: average price is above the 14-period SMA."
         };
       } else {
+        // Bearish scenario
         signal = {
-          entry: (averagePrice * 0.995).toFixed(2),
-          stopLoss: (averagePrice * 1.02).toFixed(2),
-          takeProfit: (averagePrice * 0.97).toFixed(2),
+          entry: (priceForCalculation * 0.995).toFixed(2),
+          stopLoss: (priceForCalculation * 1.02).toFixed(2),
+          takeProfit: (priceForCalculation * 0.97).toFixed(2),
           rationale: "Bearish momentum: average price is below the 14-period SMA."
         };
       }
     } else {
       // Fallback if historical data is insufficient
       signal = {
-        entry: (averagePrice * 1.005).toFixed(2),
-        stopLoss: (averagePrice * 0.98).toFixed(2),
-        takeProfit: (averagePrice * 1.03).toFixed(2),
-        rationale: "Using average price as SMA data is unavailable."
+        entry: (priceForCalculation * 1.005).toFixed(2),
+        stopLoss: (priceForCalculation * 0.98).toFixed(2),
+        takeProfit: (priceForCalculation * 1.03).toFixed(2),
+        rationale: "Using available average price; historical SMA data is insufficient."
       };
     }
 
@@ -142,9 +159,9 @@ app.post("/api/trading-signal", async (req, res) => {
       pair: upperPair,
       coingeckoPrice,
       geminiPrice,
-      averagePrice: averagePrice.toFixed(2),
+      averagePrice: priceForCalculation.toFixed(2),
       currentSMA: currentSMA !== null ? currentSMA.toFixed(2) : "N/A",
-      diffPercent: diffPercent.toFixed(2),
+      diffPercent: diffPercent !== "N/A" ? diffPercent.toFixed(2) : "N/A",
       signal,
       utcTime: new Date().toUTCString()
     });
