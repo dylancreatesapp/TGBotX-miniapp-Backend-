@@ -15,15 +15,22 @@ app.get("/", (req, res) => {
 });
 
 // Helper: Fetch current price from Binance for a given pair (e.g., "BTCUSDT")
-async function getBinancePrice(pair) {
+async function getCoinGeckoPrice(pair) {
   try {
-    const response = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`);
-    return parseFloat(response.data.price);
+    // For BTCUSDT, we'll assume pair is BTCUSDT and map it to CoinGecko's id "bitcoin" and currency "usdt".
+    // You can extend this mapping for other coins if needed.
+    if (pair.toUpperCase() === "BTCUSDT") {
+      const response = await axios.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usdt");
+      return parseFloat(response.data.bitcoin.usdt);
+    }
+    // For other pairs, implement similar mapping or fallback.
+    return null;
   } catch (error) {
-    console.error("Error fetching Binance price:", error.message);
+    console.error("Error fetching price from CoinGecko:", error.message);
     return null;
   }
 }
+
 
 // Helper: Fetch current price from Gemini for a given pair
 async function getGeminiPrice(pair) {
