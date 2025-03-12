@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
-import { sma } from "technicalindicators";  // Import SMA function
+import { sma } from "technicalindicators"; // Ensure you've installed technicalindicators via npm
 dotenv.config();
 
 const app = express();
@@ -14,16 +14,19 @@ app.get("/", (req, res) => {
   res.send("Trading Signals Backend is running!");
 });
 
-// Helper: Fetch current price from Binance for a given pair (e.g., "BTCUSDT")
+// Helper: Fetch current price from CoinGecko for BTCUSDT (mapping to Bitcoin)
 async function getCoinGeckoPrice(pair) {
   try {
-    // For BTCUSDT, we'll assume pair is BTCUSDT and map it to CoinGecko's id "bitcoin" and currency "usdt".
-    // You can extend this mapping for other coins if needed.
     if (pair.toUpperCase() === "BTCUSDT") {
-      const response = await axios.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usdt");
+      const response = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
+        params: {
+          ids: "bitcoin",
+          vs_currencies: "usdt"
+        }
+      });
       return parseFloat(response.data.bitcoin.usdt);
     }
-    // For other pairs, implement similar mapping or fallback.
+    // For additional pairs, you can extend this mapping
     return null;
   } catch (error) {
     console.error("Error fetching price from CoinGecko:", error.message);
@@ -31,12 +34,10 @@ async function getCoinGeckoPrice(pair) {
   }
 }
 
-
-// Helper: Fetch current price from Gemini for a given pair
+// Helper: Fetch current price from Gemini for a given pair (converts BTCUSDT to BTCUSD)
 async function getGeminiPrice(pair) {
   try {
-    let geminiPair = pair;
-    // Gemini uses "BTCUSD" instead of "BTCUSDT"
+    let geminiPair = pair.toUpperCase();
     if (geminiPair.endsWith("USDT")) {
       geminiPair = geminiPair.replace("USDT", "USD");
     }
@@ -49,21 +50,31 @@ async function getGeminiPrice(pair) {
   }
 }
 
-// Helper: Fetch historical closing prices from Binance (for technical indicator)
-async function getHistoricalPrices(pair, interval = '1h', limit = 24) {
+// Helper: Fetch historical closing prices from CoinGecko for technical analysis (SMA)
+// This function fetches hourly price data for the past 1 day for BTCUSDT.
+async function getHistoricalPrices(pair, days = 1) {
   try {
-    const response = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${pair}&interval=${interval}&limit=${limit}`);
-    // Each kline: [openTime, open, high, low, close, volume, ...]
-    const closes = response.data.map(kline => parseFloat(kline[4]));
-    return closes;
+    if (pair.toUpperCase() === "BTCUSDT") {
+      const response = await axios.get("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart", {
+        params: {
+          vs_currency: "usdt",
+          days: days,
+          interval: "hourly"
+        }
+      });
+      // response.data.prices is an array: [timestamp, price]
+      const prices = response.data.prices.map(item => parseFloat(item[1]));
+      return prices;
+    }
+    return null;
   } catch (error) {
-    console.error("Error fetching historical prices:", error.message);
+    console.error("Error fetching historical prices from CoinGecko:", error.message);
     return null;
   }
 }
 
 // Trading Signal Endpoint
-// Expects a JSON body: { "pair": "BTCUSD" }
+// Expects a JSON body: { "pair": "BTCUSDT" }
 app.post("/api/trading-signal", async (req, res) => {
   try {
     const { pair } = req.body;
@@ -72,58 +83,67 @@ app.post("/api/trading-signal", async (req, res) => {
     }
     const upperPair = pair.toUpperCase();
 
-    // Fetch current prices concurrently
-    const [binancePrice, geminiPrice] = await Promise.all([
-      getBinancePrice(upperPair),
+    // Fetch current prices concurrently:
+    // - Use CoinGecko for current price (since Binance gives 451 error)
+    // - Use Gemini for a secondary data point
+    const [coingeckoPrice, geminiPrice] = await Promise.all([
+      getCoinGeckoPrice(upperPair),
       getGeminiPrice(upperPair)
     ]);
 
-    if (!binancePrice || !geminiPrice) {
+    if (!coingeckoPrice || !geminiPrice) {
       return res.status(500).json({ error: "Failed to fetch current market prices." });
     }
 
     // Compute the average price
-    const averagePrice = (binancePrice + geminiPrice) / 2;
+    const averagePrice = (coingeckoPrice + geminiPrice) / 2;
 
-    // Fetch historical close prices from Binance for technical analysis
-    const historicalPrices = await getHistoricalPrices(upperPair, '1h', 24);
-    if (!historicalPrices) {
-      return res.status(500).json({ error: "Failed to fetch historical prices." });
+    // Fetch historical prices for SMA calculation
+    const historicalPrices = await getHistoricalPrices(upperPair, 1); // 1 day of hourly data
+    let currentSMA = null;
+    if (historicalPrices && historicalPrices.length >= 14) {
+      const smaValues = sma({ period: 14, values: historicalPrices });
+      currentSMA = smaValues[smaValues.length - 1] || averagePrice;
     }
-    // Calculate SMA with period 14. Note: The SMA array will have (limit - period + 1) values.
-    const smaValues = sma({ period: 14, values: historicalPrices });
-    const currentSMA = smaValues[smaValues.length - 1] || averagePrice;
 
-    // Generate trading signal based on comparison with SMA
+    // Calculate percentage difference between CoinGecko and Gemini prices
+    const diffPercent = Math.abs((coingeckoPrice - geminiPrice) / geminiPrice) * 100;
+
+    // Generate trading signal using SMA if available; otherwise, use average price defaults
     let signal;
-    if (averagePrice > currentSMA) {
-      // Bullish: current price above SMA
-      signal = {
-        entry: (averagePrice * 1.005).toFixed(2),   // ~0.5% above average
-        stopLoss: (averagePrice * 0.98).toFixed(2),   // ~2% below average
-        takeProfit: (averagePrice * 1.03).toFixed(2), // ~3% above average
-        rationale: "The average price is above the 14-period SMA, indicating bullish momentum."
-      };
+    if (currentSMA !== null) {
+      if (averagePrice > currentSMA) {
+        signal = {
+          entry: (averagePrice * 1.005).toFixed(2),
+          stopLoss: (averagePrice * 0.98).toFixed(2),
+          takeProfit: (averagePrice * 1.03).toFixed(2),
+          rationale: "Bullish momentum: average price is above the 14-period SMA."
+        };
+      } else {
+        signal = {
+          entry: (averagePrice * 0.995).toFixed(2),
+          stopLoss: (averagePrice * 1.02).toFixed(2),
+          takeProfit: (averagePrice * 0.97).toFixed(2),
+          rationale: "Bearish momentum: average price is below the 14-period SMA."
+        };
+      }
     } else {
-      // Bearish: current price below SMA
+      // Fallback if historical data is insufficient
       signal = {
-        entry: (averagePrice * 0.995).toFixed(2),    // ~0.5% below average
-        stopLoss: (averagePrice * 1.02).toFixed(2),    // ~2% above average
-        takeProfit: (averagePrice * 0.97).toFixed(2),  // ~3% below average
-        rationale: "The average price is below the 14-period SMA, indicating bearish momentum."
+        entry: (averagePrice * 1.005).toFixed(2),
+        stopLoss: (averagePrice * 0.98).toFixed(2),
+        takeProfit: (averagePrice * 1.03).toFixed(2),
+        rationale: "Using average price as SMA data is unavailable."
       };
     }
-
-    // Calculate the percentage difference between Binance and Gemini prices
-    const diffPercent = Math.abs((binancePrice - geminiPrice) / geminiPrice) * 100;
 
     res.json({
       success: true,
       pair: upperPair,
-      binancePrice,
+      coingeckoPrice,
       geminiPrice,
       averagePrice: averagePrice.toFixed(2),
-      currentSMA: currentSMA.toFixed(2),
+      currentSMA: currentSMA !== null ? currentSMA.toFixed(2) : "N/A",
       diffPercent: diffPercent.toFixed(2),
       signal,
       utcTime: new Date().toUTCString()
