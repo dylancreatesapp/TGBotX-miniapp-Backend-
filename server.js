@@ -14,23 +14,39 @@ app.get("/", (req, res) => {
   res.send("Trading Signals Backend is running!");
 });
 
-// Helper: Fetch current price from CoinGecko for BTCUSDT (mapping to Bitcoin)
+// Mapping for CoinGecko IDs by trading pair
+const coinGeckoMapping = {
+  "BTCUSDT": "bitcoin",
+  "TRXUSDT": "tron",
+  "XRPUSDT": "ripple",
+  "TONUSDT": "toncoin",  // Verify the correct CoinGecko ID for TON; often it's "toncoin"
+  "SUIUSDT": "sui"       // Verify if CoinGecko supports SUI; if not, this will return null
+};
+
+// Helper: Fetch current price from CoinGecko for supported tokens
 async function getCoinGeckoPrice(pair) {
   try {
-    if (pair.toUpperCase() === "BTCUSDT") {
-      const response = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
-        params: {
-          ids: "bitcoin",
-          vs_currencies: "usdt"
-        }
-      });
-      const price = parseFloat(response.data.bitcoin.usdt);
-      console.log("CoinGecko price:", price);
-      return price;
+    const mapping = coinGeckoMapping[pair.toUpperCase()];
+    if (!mapping) {
+      console.error("No CoinGecko mapping for pair", pair);
+      return null;
     }
-    return null;
+    const response = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
+      params: {
+        ids: mapping,
+        vs_currencies: "usdt"
+      }
+    });
+    if (response.data && response.data[mapping] && response.data[mapping].usdt) {
+      const price = parseFloat(response.data[mapping].usdt);
+      console.log(`CoinGecko price for ${pair} (${mapping}):`, price);
+      return price;
+    } else {
+      console.error("Invalid response from CoinGecko for", pair);
+      return null;
+    }
   } catch (error) {
-    console.error("Error fetching price from CoinGecko:", error.message);
+    console.error("Error fetching price from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
     return null;
   }
 }
@@ -39,16 +55,17 @@ async function getCoinGeckoPrice(pair) {
 async function getGeminiPrice(pair) {
   try {
     let geminiPair = pair.toUpperCase();
+    // Gemini uses "BTCUSD" for Bitcoin; adjust similarly for others if necessary.
     if (geminiPair.endsWith("USDT")) {
       geminiPair = geminiPair.replace("USDT", "USD");
     }
     const url = `https://api.gemini.com/v1/pubticker/${geminiPair.toLowerCase()}`;
     const response = await axios.get(url);
     const price = parseFloat(response.data.last);
-    console.log("Gemini price:", price);
+    console.log(`Gemini price for ${pair}:`, price);
     return price;
   } catch (error) {
-    console.error("Error fetching Gemini price:", error.message);
+    console.error("Error fetching Gemini price for", pair, ":", error.response ? error.response.data : error.message);
     return null;
   }
 }
@@ -64,14 +81,14 @@ async function getHistoricalPrices(pair, days = 1) {
           interval: "hourly"
         }
       });
-      // response.data.prices: Array of [timestamp, price]
       const prices = response.data.prices.map(item => parseFloat(item[1]));
-      console.log("Historical prices:", prices.slice(-5));
+      console.log("Historical prices (last 5):", prices.slice(-5));
       return prices;
     }
+    // For simplicity, for other tokens we won't calculate SMA; return null.
     return null;
   } catch (error) {
-    console.error("Error fetching historical prices from CoinGecko:", error.message);
+    console.error("Error fetching historical prices from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
     return null;
   }
 }
@@ -92,12 +109,12 @@ app.post("/api/trading-signal", async (req, res) => {
       getGeminiPrice(upperPair)
     ]);
 
-    // If both sources fail, return error.
+    // If both sources fail, return an error.
     if (!coingeckoPrice && !geminiPrice) {
       return res.status(500).json({ error: "Failed to fetch current market prices." });
     }
 
-    // Use available prices:
+    // Use available price(s)
     let priceForCalculation;
     if (coingeckoPrice && geminiPrice) {
       priceForCalculation = (coingeckoPrice + geminiPrice) / 2;
@@ -106,12 +123,10 @@ app.post("/api/trading-signal", async (req, res) => {
     } else {
       priceForCalculation = geminiPrice;
     }
-
-    // For logging:
     console.log("Price used for calculation:", priceForCalculation);
 
-    // Fetch historical prices for SMA calculation
-    const historicalPrices = await getHistoricalPrices(upperPair, 1); // 1 day of hourly data
+    // Fetch historical prices for SMA if possible (only implemented for BTCUSDT)
+    const historicalPrices = await getHistoricalPrices(upperPair, 1);
     let currentSMA = null;
     if (historicalPrices && historicalPrices.length >= 14) {
       const smaValues = sma({ period: 14, values: historicalPrices });
@@ -124,7 +139,7 @@ app.post("/api/trading-signal", async (req, res) => {
       diffPercent = Math.abs((coingeckoPrice - geminiPrice) / geminiPrice) * 100;
     }
 
-    // Generate trading signal using SMA if available; otherwise, use priceForCalculation
+    // Generate trading signal
     let signal;
     if (currentSMA !== null) {
       if (priceForCalculation > currentSMA) {
@@ -145,7 +160,7 @@ app.post("/api/trading-signal", async (req, res) => {
         };
       }
     } else {
-      // Fallback if historical data is insufficient
+      // If SMA data is not available, fallback to default signal calculation
       signal = {
         entry: (priceForCalculation * 1.005).toFixed(2),
         stopLoss: (priceForCalculation * 0.98).toFixed(2),
