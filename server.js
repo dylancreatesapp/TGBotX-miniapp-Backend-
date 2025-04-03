@@ -2,8 +2,12 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import dotenv from "dotenv";
-import { sma } from "technicalindicators"; // Ensure you've installed technicalindicators via npm
+import { sma } from "technicalindicators";
+import crypto from "crypto";
+
 dotenv.config();
+
+const BOT_TOKEN = process.env.BOT_TOKEN || '8175210664:AAEs4eFLN0JmymnaIjsftVHk2Y6bZBQ3X-Y';
 
 const app = express();
 app.use(cors());
@@ -14,85 +18,8 @@ app.get("/", (req, res) => {
   res.send("Trading Signals Backend is running!");
 });
 
-// Mapping for CoinGecko IDs by trading pair
-const coinGeckoMapping = {
-  "BTCUSDT": "bitcoin",
-  "TRXUSDT": "tron",
-  "XRPUSDT": "ripple",
-  "TONUSDT": "toncoin",  // Verify the correct CoinGecko ID for TON; often it's "toncoin"
-  "SUIUSDT": "sui"       // Verify if CoinGecko supports SUI; if not, this will return null
-};
+// ----- Trading Signal Endpoint (existing code) -----
 
-// Helper: Fetch current price from CoinGecko for supported tokens
-async function getCoinGeckoPrice(pair) {
-  try {
-    const mapping = coinGeckoMapping[pair.toUpperCase()];
-    if (!mapping) {
-      console.error("No CoinGecko mapping for pair", pair);
-      return null;
-    }
-    const response = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
-      params: {
-        ids: mapping,
-        vs_currencies: "usdt"
-      }
-    });
-    if (response.data && response.data[mapping] && response.data[mapping].usdt) {
-      const price = parseFloat(response.data[mapping].usdt);
-      console.log(`CoinGecko price for ${pair} (${mapping}):`, price);
-      return price;
-    } else {
-      console.error("Invalid response from CoinGecko for", pair);
-      return null;
-    }
-  } catch (error) {
-    console.error("Error fetching price from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
-    return null;
-  }
-}
-
-// Helper: Fetch current price from Gemini for a given pair (converts BTCUSDT to BTCUSD)
-async function getGeminiPrice(pair) {
-  try {
-    let geminiPair = pair.toUpperCase();
-    if (geminiPair.endsWith("USDT")) {
-      geminiPair = geminiPair.replace("USDT", "USD");
-    }
-    const url = `https://api.gemini.com/v1/pubticker/${geminiPair.toLowerCase()}`;
-    const response = await axios.get(url);
-    const price = parseFloat(response.data.last);
-    console.log(`Gemini price for ${pair}:`, price);
-    return price;
-  } catch (error) {
-    console.error("Error fetching Gemini price for", pair, ":", error.response ? error.response.data : error.message);
-    return null;
-  }
-}
-
-// Helper: Fetch historical closing prices from CoinGecko for technical analysis (SMA)
-async function getHistoricalPrices(pair, days = 1) {
-  try {
-    if (pair.toUpperCase() === "BTCUSDT") {
-      const response = await axios.get("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart", {
-        params: {
-          vs_currency: "usdt",
-          days: days,
-          interval: "hourly"
-        }
-      });
-      const prices = response.data.prices.map(item => parseFloat(item[1]));
-      console.log("Historical prices (last 5):", prices.slice(-5));
-      return prices;
-    }
-    return null;
-  } catch (error) {
-    console.error("Error fetching historical prices from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
-    return null;
-  }
-}
-
-// Trading Signal Endpoint
-// Expects a JSON body: { "pair": "BTCUSDT" }
 app.post("/api/trading-signal", async (req, res) => {
   try {
     const { pair } = req.body;
@@ -176,20 +103,135 @@ app.post("/api/trading-signal", async (req, res) => {
   }
 });
 
-// New Endpoint for Telegram Login Authentication
+// ----- New Endpoint for Telegram Login Verification -----
+// This endpoint expects a JSON body containing { tgData: "<query-string>" }
 app.post("/api/auth/telegram", async (req, res) => {
   try {
-    const { telegramId, username, firstName, lastName } = req.body;
-    // Save user data to your database or log it (for now, we log it)
-    console.log("New Telegram user:", telegramId, username, firstName, lastName);
+    const { tgData } = req.body;
+    if (!tgData) {
+      return res.status(400).json({ success: false, message: "No Telegram data provided." });
+    }
     
-    // Respond with a success message
-    res.json({ success: true, message: "User data stored successfully" });
+    // Parse tgData (a query-string) into an object
+    const params = new URLSearchParams(tgData);
+    const dataObj = {};
+    for (const [key, value] of params.entries()) {
+      dataObj[key] = value;
+    }
+    
+    if (!dataObj.hash) {
+      return res.status(400).json({ success: false, message: "No hash parameter found." });
+    }
+    
+    const providedHash = dataObj.hash;
+    delete dataObj.hash;
+    
+    // Create data_check_string: sort keys alphabetically and join as "key=value" with newline separators
+    const sortedKeys = Object.keys(dataObj).sort();
+    const dataCheckString = sortedKeys.map(key => `${key}=${dataObj[key]}`).join("\n");
+    
+    // Compute the secret key as the SHA-256 hash of your BOT_TOKEN
+    const secretKey = crypto.createHash("sha256").update(BOT_TOKEN).digest();
+    
+    // Compute HMAC-SHA256 of the dataCheckString using the secretKey
+    const computedHash = crypto.createHmac("sha256", secretKey)
+                               .update(dataCheckString)
+                               .digest("hex");
+    
+    // Compare computed hash with the provided hash
+    if (computedHash !== providedHash) {
+      return res.status(400).json({ success: false, message: "Data verification failed." });
+    }
+    
+    // Optionally, check that the auth_date is recent (e.g., within 24 hours)
+    const authDate = parseInt(dataObj.auth_date, 10);
+    const now = Math.floor(Date.now() / 1000);
+    if (now - authDate > 86400) {
+      return res.status(400).json({ success: false, message: "Authentication data is outdated." });
+    }
+    
+    // Data is verified. Here you can store user data or process the login as needed.
+    console.log("Verified Telegram user data:", dataObj);
+    res.json({ success: true, message: "User authenticated successfully.", user: dataObj });
+    
   } catch (err) {
-    console.error("Error storing user data:", err);
-    res.status(500).json({ success: false, error: "Internal server error" });
+    console.error("Error processing Telegram login:", err);
+    res.status(500).json({ success: false, message: "Internal server error." });
   }
 });
+
+// Helper functions used in trading signal endpoint:
+async function getCoinGeckoPrice(pair) {
+  try {
+    const coinGeckoMapping = {
+      "BTCUSDT": "bitcoin",
+      "TRXUSDT": "tron",
+      "XRPUSDT": "ripple",
+      "TONUSDT": "toncoin",
+      "SUIUSDT": "sui"
+    };
+    const mapping = coinGeckoMapping[pair.toUpperCase()];
+    if (!mapping) {
+      console.error("No CoinGecko mapping for pair", pair);
+      return null;
+    }
+    const response = await axios.get("https://api.coingecko.com/api/v3/simple/price", {
+      params: {
+        ids: mapping,
+        vs_currencies: "usdt"
+      }
+    });
+    if (response.data && response.data[mapping] && response.data[mapping].usdt) {
+      const price = parseFloat(response.data[mapping].usdt);
+      console.log(`CoinGecko price for ${pair} (${mapping}):`, price);
+      return price;
+    } else {
+      console.error("Invalid response from CoinGecko for", pair);
+      return null;
+    }
+  } catch (error) {
+    console.error("Error fetching price from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
+    return null;
+  }
+}
+
+async function getGeminiPrice(pair) {
+  try {
+    let geminiPair = pair.toUpperCase();
+    if (geminiPair.endsWith("USDT")) {
+      geminiPair = geminiPair.replace("USDT", "USD");
+    }
+    const url = `https://api.gemini.com/v1/pubticker/${geminiPair.toLowerCase()}`;
+    const response = await axios.get(url);
+    const price = parseFloat(response.data.last);
+    console.log(`Gemini price for ${pair}:`, price);
+    return price;
+  } catch (error) {
+    console.error("Error fetching Gemini price for", pair, ":", error.response ? error.response.data : error.message);
+    return null;
+  }
+}
+
+async function getHistoricalPrices(pair, days = 1) {
+  try {
+    if (pair.toUpperCase() === "BTCUSDT") {
+      const response = await axios.get("https://api.coingecko.com/api/v3/coins/bitcoin/market_chart", {
+        params: {
+          vs_currency: "usdt",
+          days: days,
+          interval: "hourly"
+        }
+      });
+      const prices = response.data.prices.map(item => parseFloat(item[1]));
+      console.log("Historical prices (last 5):", prices.slice(-5));
+      return prices;
+    }
+    return null;
+  } catch (error) {
+    console.error("Error fetching historical prices from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
+    return null;
+  }
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
