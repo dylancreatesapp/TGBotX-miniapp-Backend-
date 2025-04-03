@@ -55,7 +55,6 @@ async function getCoinGeckoPrice(pair) {
 async function getGeminiPrice(pair) {
   try {
     let geminiPair = pair.toUpperCase();
-    // Gemini uses "BTCUSD" for Bitcoin; adjust similarly for others if necessary.
     if (geminiPair.endsWith("USDT")) {
       geminiPair = geminiPair.replace("USDT", "USD");
     }
@@ -85,7 +84,6 @@ async function getHistoricalPrices(pair, days = 1) {
       console.log("Historical prices (last 5):", prices.slice(-5));
       return prices;
     }
-    // For simplicity, for other tokens we won't calculate SMA; return null.
     return null;
   } catch (error) {
     console.error("Error fetching historical prices from CoinGecko for", pair, ":", error.response ? error.response.data : error.message);
@@ -109,12 +107,10 @@ app.post("/api/trading-signal", async (req, res) => {
       getGeminiPrice(upperPair)
     ]);
 
-    // If both sources fail, return an error.
     if (!coingeckoPrice && !geminiPrice) {
       return res.status(500).json({ error: "Failed to fetch current market prices." });
     }
 
-    // Use available price(s)
     let priceForCalculation;
     if (coingeckoPrice && geminiPrice) {
       priceForCalculation = (coingeckoPrice + geminiPrice) / 2;
@@ -125,7 +121,6 @@ app.post("/api/trading-signal", async (req, res) => {
     }
     console.log("Price used for calculation:", priceForCalculation);
 
-    // Fetch historical prices for SMA if possible (only implemented for BTCUSDT)
     const historicalPrices = await getHistoricalPrices(upperPair, 1);
     let currentSMA = null;
     if (historicalPrices && historicalPrices.length >= 14) {
@@ -133,17 +128,14 @@ app.post("/api/trading-signal", async (req, res) => {
       currentSMA = smaValues[smaValues.length - 1] || priceForCalculation;
     }
 
-    // Calculate percentage difference if both prices are available
     let diffPercent = "N/A";
     if (coingeckoPrice && geminiPrice) {
       diffPercent = Math.abs((coingeckoPrice - geminiPrice) / geminiPrice) * 100;
     }
 
-    // Generate trading signal
     let signal;
     if (currentSMA !== null) {
       if (priceForCalculation > currentSMA) {
-        // Bullish scenario
         signal = {
           entry: (priceForCalculation * 1.005).toFixed(2),
           stopLoss: (priceForCalculation * 0.98).toFixed(2),
@@ -151,7 +143,6 @@ app.post("/api/trading-signal", async (req, res) => {
           rationale: "Bullish momentum: average price is above the 14-period SMA."
         };
       } else {
-        // Bearish scenario
         signal = {
           entry: (priceForCalculation * 0.995).toFixed(2),
           stopLoss: (priceForCalculation * 1.02).toFixed(2),
@@ -160,7 +151,6 @@ app.post("/api/trading-signal", async (req, res) => {
         };
       }
     } else {
-      // If SMA data is not available, fallback to default signal calculation
       signal = {
         entry: (priceForCalculation * 1.005).toFixed(2),
         stopLoss: (priceForCalculation * 0.98).toFixed(2),
@@ -183,6 +173,21 @@ app.post("/api/trading-signal", async (req, res) => {
   } catch (error) {
     console.error("Error generating trading signal:", error.message);
     res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// New Endpoint for Telegram Login Authentication
+app.post("/api/auth/telegram", async (req, res) => {
+  try {
+    const { telegramId, username, firstName, lastName } = req.body;
+    // Save user data to your database or log it (for now, we log it)
+    console.log("New Telegram user:", telegramId, username, firstName, lastName);
+    
+    // Respond with a success message
+    res.json({ success: true, message: "User data stored successfully" });
+  } catch (err) {
+    console.error("Error storing user data:", err);
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
