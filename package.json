@@ -17,5 +17,6 @@
     "express": "^4.21.2",
     "openai": "^4.86.2",
     "technicalindicators": "^3.1.0"
+    "nodemailer": "^11.2.0"
   }
 }
